@@ -125,6 +125,24 @@ type CompletionChunk struct {
 	SystemFingerprint string                `json:"system_fingerprint"`
 }
 
+type EmbeddingsRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+type Embedding struct {
+	Index     int64     `json:"index"`
+	Embedding []float64 `json:"embedding"`
+	Object    string    `json:"object"`
+}
+
+type Embeddings struct {
+	Data   []Embedding `json:"data"`
+	Model  string      `json:"model"`
+	Object string      `json:"object"`
+	Usage  Usage       `json:"usage,omitempty"`
+}
+
 type Model struct {
 	Id      string `json:"id"`
 	Object  string `json:"object"`
@@ -240,6 +258,22 @@ func toCompleteChunk(id string, r api.GenerateResponse) CompletionChunk {
 				return nil
 			}(r.DoneReason),
 		}},
+	}
+}
+
+func toEmbeddings(model string, r api.EmbeddingResponse) Embeddings {
+	return Embeddings{
+		Data: []Embedding{{
+			Embedding: r.Embedding,
+			Index:     0,
+			Object:    "embedding",
+		}},
+		Model:  model,
+		Object: "list",
+		Usage: Usage{
+			PromptTokens: len(r.Embedding),
+			TotalTokens:  len(r.Embedding),
+		},
 	}
 }
 
@@ -382,6 +416,13 @@ func fromCompleteRequest(r CompletionRequest) (api.GenerateRequest, error) {
 	}, nil
 }
 
+func fromEmbeddingRequest(r EmbeddingsRequest) (api.EmbeddingRequest, error) {
+	return api.EmbeddingRequest{
+		Prompt: r.Input,
+		Model:  r.Model,
+	}, nil
+}
+
 type BaseWriter struct {
 	gin.ResponseWriter
 }
@@ -395,6 +436,11 @@ type ChatWriter struct {
 type CompleteWriter struct {
 	stream bool
 	id     string
+	BaseWriter
+}
+
+type EmbeddingsWriter struct {
+	model string
 	BaseWriter
 }
 
@@ -521,6 +567,31 @@ func (w *CompleteWriter) Write(data []byte) (int, error) {
 	return w.writeResponse(data)
 }
 
+func (w *EmbeddingsWriter) writeResponse(data []byte) (int, error) {
+	var embedResp api.EmbeddingResponse
+	err := json.Unmarshal(data, &embedResp)
+	if err != nil {
+		return 0, err
+	}
+
+	w.ResponseWriter.Header().Set("Content-Type", "application/json")
+	err = json.NewEncoder(w.ResponseWriter).Encode(toEmbeddings(w.model, embedResp))
+	if err != nil {
+		return 0, err
+	}
+
+	return len(data), nil
+}
+
+func (w *EmbeddingsWriter) Write(data []byte) (int, error) {
+	code := w.ResponseWriter.Status()
+	if code != http.StatusOK {
+		return w.writeError(code, data)
+	}
+
+	return w.writeResponse(data)
+}
+
 func (w *ListWriter) writeResponse(data []byte) (int, error) {
 	var listResponse api.ListResponse
 	err := json.Unmarshal(data, &listResponse)
@@ -598,6 +669,41 @@ func RetrieveMiddleware() gin.HandlerFunc {
 		w := &RetrieveWriter{
 			BaseWriter: BaseWriter{ResponseWriter: c.Writer},
 			model:      c.Param("model"),
+		}
+
+		c.Writer = w
+
+		c.Next()
+	}
+}
+
+func EmbeddingsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req EmbeddingsRequest
+		err := c.ShouldBindJSON(&req)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, NewError(http.StatusBadRequest, err.Error()))
+			return
+		}
+
+		var b bytes.Buffer
+
+		embedReq, err := fromEmbeddingRequest(req)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, NewError(http.StatusBadRequest, err.Error()))
+			return
+		}
+
+		if err := json.NewEncoder(&b).Encode(embedReq); err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, NewError(http.StatusInternalServerError, err.Error()))
+			return
+		}
+
+		c.Request.Body = io.NopCloser(&b)
+
+		w := &EmbeddingsWriter{
+			model:      req.Model,
+			BaseWriter: BaseWriter{ResponseWriter: c.Writer},
 		}
 
 		c.Writer = w
