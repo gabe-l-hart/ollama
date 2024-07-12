@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,37 @@ func TestMiddlewareRequests(t *testing.T) {
 				}
 			},
 		},
+		{
+			Name:    "embeddings handler",
+			Method:  http.MethodPost,
+			Path:    "/api/embeddings",
+			Handler: EmbeddingsMiddleware,
+			Setup: func(t *testing.T, req *http.Request) {
+				body := EmbeddingsRequest{
+					Model: "test-model",
+					Input: "Hello",
+				}
+
+				bodyBytes, _ := json.Marshal(body)
+
+				req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				req.Header.Set("Content-Type", "application/json")
+			},
+			Expected: func(t *testing.T, req *http.Request) {
+				var embedReq api.EmbeddingRequest
+				if err := json.NewDecoder(req.Body).Decode(&embedReq); err != nil {
+					t.Fatal(err)
+				}
+
+				if embedReq.Prompt != "Hello" {
+					t.Fatalf("expected 'Hello', got %s", embedReq.Prompt)
+				}
+
+				if embedReq.Model != "test-model" {
+					t.Fatalf("expected 'test-model', got %s", embedReq.Model)
+				}
+			},
+		},
 	}
 
 	gin.SetMode(gin.TestMode)
@@ -181,6 +213,55 @@ func TestMiddlewareResponses(t *testing.T) {
 
 				if !strings.Contains(resp.Body.String(), `"invalid request"`) {
 					t.Fatalf("error was not forwarded")
+				}
+			},
+		},
+		{
+			Name:     "embeddings response",
+			Method:   http.MethodPost,
+			Path:     "/api/embeddings",
+			TestPath: "/api/embeddings",
+			Handler:  EmbeddingsMiddleware,
+			Endpoint: func(c *gin.Context) {
+				c.JSON(http.StatusOK, api.EmbeddingResponse{
+					Embedding: []float64{0.1, 0.2, 0.3},
+				})
+			},
+			Setup: func(t *testing.T, req *http.Request) {
+				body := EmbeddingsRequest{
+					Model: "test-model",
+					Input: "Hello",
+				}
+
+				bodyBytes, _ := json.Marshal(body)
+
+				req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				req.Header.Set("Content-Type", "application/json")
+			},
+			Expected: func(t *testing.T, resp *httptest.ResponseRecorder) {
+				if resp.Code != http.StatusOK {
+					t.Fatalf("expected 200, got %d", resp.Code)
+				}
+
+				var embedResp Embeddings
+				if err := json.NewDecoder(resp.Body).Decode(&embedResp); err != nil {
+					t.Fatal(err)
+				}
+
+				if len(embedResp.Data) != 1 {
+					t.Fatalf("expected one embedding, got %d", len(embedResp.Data))
+				}
+				embedding := embedResp.Data[0]
+				if !reflect.DeepEqual(embedding.Embedding, []float64{0.1, 0.2, 0.3}) {
+					t.Fatalf("expected embedding %v, got %v", []float64{0.1, 0.2, 0.3}, embedding.Embedding)
+				}
+
+				if embedding.Index != 0 {
+					t.Fatalf("expected index to be 0, got %d", embedding.Index)
+				}
+
+				if embedding.Object != "embedding" {
+					t.Fatalf("expected object to be 'embedding', got %s", embedding.Object)
 				}
 			},
 		},
