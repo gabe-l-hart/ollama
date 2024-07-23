@@ -44,8 +44,13 @@ import (
 var mode string = gin.DebugMode
 
 type Server struct {
-	addr  net.Addr
-	sched *Scheduler
+	addr       net.Addr
+	sched      *Scheduler
+	srvr       *http.Server
+	ctx        context.Context
+	serverDone context.CancelFunc
+	schedDone  context.CancelFunc
+	errorChan  chan error
 }
 
 func init() {
@@ -1128,6 +1133,14 @@ func allowedHostsMiddleware(addr net.Addr) gin.HandlerFunc {
 	}
 }
 
+func (s *Server) Terminate() {
+	s.srvr.Close()
+	s.schedDone()
+	s.sched.unloadAllRunners()
+	gpu.Cleanup()
+	s.serverDone()
+}
+
 func (s *Server) GenerateRoutes() http.Handler {
 	config := cors.DefaultConfig()
 	config.AllowWildcard = true
@@ -1180,7 +1193,7 @@ func (s *Server) GenerateRoutes() http.Handler {
 	return r
 }
 
-func Serve(ln net.Listener) error {
+func ServeNonBlocking(ln net.Listener) (*Server, error) {
 	level := slog.LevelInfo
 	if envconfig.Debug() {
 		level = slog.LevelDebug
@@ -1204,10 +1217,10 @@ func Serve(ln net.Listener) error {
 
 	blobsDir, err := GetBlobsPath("")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := fixBlobs(blobsDir); err != nil {
-		return err
+		return nil, err
 	}
 
 	if !envconfig.NoPrune() {
@@ -1233,13 +1246,19 @@ func Serve(ln net.Listener) error {
 	ctx, done := context.WithCancel(context.Background())
 	schedCtx, schedDone := context.WithCancel(ctx)
 	sched := InitScheduler(schedCtx)
-	s := &Server{addr: ln.Addr(), sched: sched}
+	s := &Server{
+		addr:       ln.Addr(),
+		sched:      sched,
+		ctx:        ctx,
+		serverDone: done,
+		schedDone:  schedDone,
+	}
 
 	http.Handle("/", s.GenerateRoutes())
 
 	slog.Info(fmt.Sprintf("Listening on %s (version %s)", ln.Addr(), version.Version))
 	tlsConfig := envconfig.ServerTlsConfig()
-	srvr := &http.Server{
+	s.srvr = &http.Server{
 		// Use http.DefaultServeMux so we get net/http/pprof for
 		// free.
 		//
@@ -1258,7 +1277,7 @@ func Serve(ln net.Listener) error {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-signals
-		srvr.Close()
+		s.srvr.Close()
 		schedDone()
 		sched.unloadAllRunners()
 		runners.Cleanup(build.EmbedFS)
@@ -1266,7 +1285,7 @@ func Serve(ln net.Listener) error {
 	}()
 
 	if _, err := runners.Refresh(build.EmbedFS); err != nil {
-		return fmt.Errorf("unable to initialize llm runners %w", err)
+		return s, fmt.Errorf("unable to initialize llm runners %w", err)
 	}
 
 	s.sched.Run(schedCtx)
@@ -1276,19 +1295,36 @@ func Serve(ln net.Listener) error {
 	gpus := discover.GetGPUInfo()
 	gpus.LogDetails()
 
+	s.errorChan = make(chan error, 1)
 	if tlsConfig != nil {
 		slog.Info("Serving with TLS")
-		err = srvr.ServeTLS(ln, "", "")
+		go func() {
+			s.errorChan <- s.srvr.ServeTLS(ln, "", "")
+		}()
 	} else {
-		err = srvr.Serve(ln)
+		go func() {
+			s.errorChan <- s.srvr.Serve(ln)
+		}()
 	}
 	// If server is closed from the signal handler, wait for the ctx to be done
 	// otherwise error out quickly
 	if !errors.Is(err, http.ErrServerClosed) {
+		return s, err
+	}
+	return s, err
+}
+
+func Serve(ln net.Listener) error {
+	s, err := ServeNonBlocking(ln)
+	if err != nil {
 		return err
 	}
-	<-ctx.Done()
-	return nil
+	err = <-s.errorChan
+	if !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	<-s.ctx.Done()
+	return err
 }
 
 func waitForStream(c *gin.Context, ch chan interface{}) {
