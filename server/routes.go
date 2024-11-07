@@ -1137,7 +1137,6 @@ func (s *Server) Terminate() {
 	s.srvr.Close()
 	s.schedDone()
 	s.sched.unloadAllRunners()
-	gpu.Cleanup()
 	s.serverDone()
 }
 
@@ -1229,16 +1228,16 @@ func ServeNonBlocking(ln net.Listener) (*Server, error) {
 		} else {
 			// clean up unused layers and manifests
 			if err := PruneLayers(); err != nil {
-				return err
+				return nil, err
 			}
 
 			manifestsPath, err := GetManifestPath()
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			if err := PruneDirectory(manifestsPath); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
