@@ -53,20 +53,23 @@ func (p *MultiModalProjector) Forward(ctx ml.Context, visionOutputs ml.Tensor, i
 }
 
 func New(c ml.Config) (model.Model, error) {
+	vocab := model.Vocabulary{
+		Values: c.Strings("tokenizer.ggml.tokens"),
+		Scores: c.Floats("tokenizer.ggml.scores"),
+		Types:  c.Uints("tokenizer.ggml.token_type"),
+		BOS:    int32(c.Uint("tokenizer.ggml.bos_token_id")),
+		AddBOS: c.Bool("tokenizer.ggml.add_bos_token", true),
+		EOS:    int32(1),
+		AddEOS: c.Bool("tokenizer.ggml.add_eos_token", false),
+		EOT:    int32(106),
+		AddEOT: c.Bool("tokenizer.ggml.add_eot_token", false),
+	}
+	vocab.AppendSpecial("<start_of_turn>")
+	vocab.AppendSpecial("<end_of_turn>")
 	m := Model{
 		SentencePieceModel: model.NewSentencePieceModel(
 			c.String("tokenizer.ggml.pretokenizer", `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`),
-			&model.Vocabulary{
-				Values: c.Strings("tokenizer.ggml.tokens"),
-				Scores: c.Floats("tokenizer.ggml.scores"),
-				Types:  c.Uints("tokenizer.ggml.token_type"),
-				BOS:    int32(c.Uint("tokenizer.ggml.bos_token_id")),
-				AddBOS: c.Bool("tokenizer.ggml.add_bos_token", true),
-				EOS:    int32(1),
-				AddEOS: c.Bool("tokenizer.ggml.add_eos_token", false),
-				EOT:    int32(106),
-				AddEOT: c.Bool("tokenizer.ggml.add_eot_token", false),
-			},
+			&vocab,
 		),
 		ImageProcessor: newImageProcessor(c),
 		VisionModel:    newVisionModel(c),

@@ -82,6 +82,10 @@ func (v *Vocabulary) Decode(id int32) string {
 	return v.Values[id]
 }
 
+func (v *Vocabulary) AppendSpecial(s string) {
+	v.special = append(v.special, s)
+}
+
 func (v *Vocabulary) SpecialVocabulary() []string {
 	v.specialOnce.Do(func() {
 		for i := range v.Values {
