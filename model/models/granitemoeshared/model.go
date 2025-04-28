@@ -180,11 +180,24 @@ func (moe *MoE) Forward(ctx ml.Context, hiddenState ml.Tensor, opts *Options) ml
 	return moeOut
 }
 
+
+type SharedMLP struct {
+	UpShexp   *nn.Linear `gguf:"ffn_up_shexp"`
+	DownShexp *nn.Linear `gguf:"ffn_down_shexp"`
+	GateShexp *nn.Linear `gguf:"ffn_gate_shexp"`
+}
+
+func (mlp *SharedMLP) Forward(ctx ml.Context, hiddenState ml.Tensor, opts *Options) ml.Tensor {
+	hiddenState = mlp.GateShexp.Forward(ctx, hiddenState).SILU(ctx).Mul(ctx, mlp.UpShexp.Forward(ctx, hiddenState))
+	return mlp.DownShexp.Forward(ctx, hiddenState)
+}
+
 type Layer struct {
 	AttentionNorm *nn.RMSNorm `gguf:"attn_norm"`
 	SelfAttention *SelfAttention
 	MoENorm       *nn.RMSNorm `gguf:"ffn_norm"`
 	MoE           *MoE
+	SharedMLP     *SharedMLP
 }
 
 func (l *Layer) Forward(ctx ml.Context, hiddenState, positionIDs, outputs ml.Tensor, cache kvcache.Cache, opts *Options) ml.Tensor {
@@ -204,8 +217,15 @@ func (l *Layer) Forward(ctx ml.Context, hiddenState, positionIDs, outputs ml.Ten
 	hiddenState = hiddenState.Add(ctx, residual)
 	residual = hiddenState
 
+	// Standard MoE
 	hiddenState = l.MoENorm.Forward(ctx, hiddenState, opts.eps)
-	hiddenState = l.MoE.Forward(ctx, hiddenState, opts)
+	moeHiddenState := l.MoE.Forward(ctx, hiddenState, opts)
+
+	// Shared expert
+	sharedMoeHiddenState := l.SharedMLP.Forward(ctx, hiddenState, opts)
+	hiddenState = moeHiddenState.Add(ctx, sharedMoeHiddenState)
+
+	// Scaled residual
 	hiddenState = hiddenState.Scale(ctx, opts.residualMultiplier)
 	return hiddenState.Add(ctx, residual)
 }
@@ -242,5 +262,5 @@ func (m *Model) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
 }
 
 func init() {
-	model.Register("granitemoe", New)
+	model.Register("granitemoeshared", New)
 }
